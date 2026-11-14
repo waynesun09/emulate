@@ -25,7 +25,7 @@ import {
   type FlatTree,
 } from "../git-helpers.js";
 
-function normalizePath(raw: string): string {
+export function normalizePath(raw: string): string {
   const path = raw.replace(/^\/+|\/+$/g, "");
   if (path.includes("\0") || path.split("/").some((part) => part === "" || part === "." || part === "..")) {
     throw new ApiError(422, "path is invalid");
@@ -33,7 +33,7 @@ function normalizePath(raw: string): string {
   return path;
 }
 
-function isWorkflowPath(path: string): boolean {
+export function isWorkflowPath(path: string): boolean {
   return path.startsWith(".github/workflows/");
 }
 
@@ -97,7 +97,7 @@ function acceptsRawContent(accept: string | undefined): boolean {
   });
 }
 
-type FileTreeEntry = { mode: string; type: "blob" | "commit"; sha: string; size?: number };
+export type FileTreeEntry = { mode: string; type: "blob" | "commit"; sha: string; size?: number };
 
 function contentLinks(repo: GitHubRepo, baseUrl: string, path: string, ref: string, blobSha?: string) {
   const repoUrl = `${baseUrl}/repos/${repo.full_name}`;
@@ -325,7 +325,7 @@ function formatDirListing(
   return [...dirs, ...files].sort((a, b) => String(a.name).localeCompare(String(b.name)));
 }
 
-function decodeBodyContent(content: string): { text: string | null; base64: string } {
+export function decodeBodyContent(content: string): { text: string | null; base64: string } {
   const normalized = content.replace(/\s/g, "");
   if (
     normalized.length % 4 === 1 ||
@@ -345,7 +345,7 @@ function decodeBodyContent(content: string): { text: string | null; base64: stri
   return { text: null, base64: buf.toString("base64") };
 }
 
-interface CommitIdentity {
+export interface CommitIdentity {
   name: string;
   email: string;
   date?: string;
@@ -414,7 +414,7 @@ function persistTree(gh: GitHubStore, repoId: number, entries: Map<string, FileT
   return write(root);
 }
 
-interface CommitFilesParams {
+export interface CommitFilesParams {
   repo: GitHubRepo;
   branchName: string;
   message: string;
@@ -426,7 +426,7 @@ interface CommitFilesParams {
   headCommit: GitHubCommit | null;
 }
 
-function commitFiles(gh: GitHubStore, params: CommitFilesParams): GitHubCommit {
+export function commitFiles(gh: GitHubStore, params: CommitFilesParams): GitHubCommit {
   const { repo, branchName, headCommit, actor } = params;
 
   const entries = new Map<string, FileTreeEntry>();

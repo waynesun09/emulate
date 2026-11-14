@@ -301,6 +301,16 @@ curl -X PUT http://localhost:4001/repos/octocat/hello-world/contents/notes.txt \
   -H "Content-Type: application/json" \
   -d '{"message": "Update notes", "content": "aGVsbG8K"}'
 
+# Commit several file changes with GraphQL createCommitOnBranch (the only GraphQL field).
+# expectedHeadOid is the branch head: GET /repos/octocat/hello-world/git/ref/heads/main, then .object.sha
+curl -X POST http://localhost:4001/graphql \
+  -H "Authorization: bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }",
+       "variables": {"input": {"branch": {"repositoryNameWithOwner": "octocat/hello-world", "branchName": "main"},
+         "expectedHeadOid": "<current head sha>", "message": {"headline": "Add a.txt"},
+         "fileChanges": {"additions": [{"path": "a.txt", "contents": "aGVsbG8K"}], "deletions": [{"path": "notes.txt"}]}}}}'
+
 # List commits, get a commit with file stats, or compare refs
 curl http://localhost:4001/repos/octocat/hello-world/commits
 curl http://localhost:4001/repos/octocat/hello-world/commits/main

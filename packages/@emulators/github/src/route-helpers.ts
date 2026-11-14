@@ -260,7 +260,14 @@ export function assertBranchUpdateAllowed(
   user: GitHubUser,
   repo: GitHubRepo,
   branchName: string,
-  options: { force?: boolean; parentCount?: number; deletion?: boolean; currentSha?: string; targetSha?: string } = {},
+  options: {
+    force?: boolean;
+    parentCount?: number;
+    deletion?: boolean;
+    currentSha?: string;
+    targetSha?: string;
+    signed?: boolean;
+  } = {},
 ): void {
   const protection = gh.branchProtections
     .findBy("repo_id", repo.id)
@@ -289,7 +296,7 @@ export function assertBranchUpdateAllowed(
     options.deletion !== true &&
     (protection.required_pull_request_reviews !== null ||
       (requiredContexts.length > 0 && !requiredChecksPassed) ||
-      protection.required_signatures);
+      (protection.required_signatures && options.signed !== true));
   const invalidHistory =
     options.deletion !== true &&
     protection.required_linear_history &&

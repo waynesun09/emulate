@@ -117,6 +117,7 @@ Organization `members` are optional. Each entry references a seeded user by `log
 - Send `Accept: application/vnd.github.raw` or `application/vnd.github.raw+json` to file Contents and README requests to receive raw bytes; directory and submodule responses remain JSON
 - `GET /:owner/:repo/raw/:ref/:path` - download file content from advertised raw URLs; this is separate from Accept negotiation
 - `PUT/DELETE /repos/:owner/:repo/contents/:path` - create, update, or delete a file and commit the change
+- `POST /graphql` (also `/api/graphql`) - the `createCommitOnBranch` mutation only: commits base64 file additions and deletions on top of `expectedHeadOid`, moves the branch, and sends a `push` webhook. Failures return HTTP 200 with `errors[].type` set to `STALE_DATA`, `NOT_FOUND`, `FORBIDDEN`, `BRANCH_PROTECTION_RULE_VIOLATION`, or `UNPROCESSABLE`. The commit counts as signed for required signature protection
 - `GET /repos/:owner/:repo/commits` - list commits with ref, path, author, and date filters
 - `GET /repos/:owner/:repo/commits/:ref` - get a commit with file diffs and stats
 - `GET /repos/:owner/:repo/compare/:base...:head` - compare two refs

@@ -24,6 +24,7 @@ import { reviewsRoutes } from "./routes/reviews.js";
 import { labelsAndMilestonesRoutes } from "./routes/labels.js";
 import { branchesAndGitRoutes } from "./routes/branches.js";
 import { contentsRoutes } from "./routes/contents.js";
+import { graphqlRoutes } from "./routes/graphql.js";
 import { commitsRoutes } from "./routes/commits.js";
 import { getOrCreateMembersTeam, orgsAndTeamsRoutes } from "./routes/orgs.js";
 import { releasesRoutes } from "./routes/releases.js";
@@ -707,6 +708,7 @@ export const githubPlugin: ServicePlugin = {
     appsRoutes(ctx);
     installationTokenRoutes(ctx);
     contentsRoutes(ctx);
+    graphqlRoutes(ctx);
     // Registered last: the catch-all /commits/:ref{.+} route must not shadow
     // /commits/:sha/comments (comments.ts) or /commits/:ref/check-* (checks.ts).
     commitsRoutes(ctx);
