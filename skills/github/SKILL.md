@@ -182,6 +182,11 @@ github:
       members:
         - login: octocat
           role: admin
+      variables:
+        - name: ALLOWLIST
+          value: octocat,hubot
+          visibility: selected
+          selected_repositories: [org-repo]
   repos:
     - owner: octocat
       name: hello-world
@@ -190,6 +195,9 @@ github:
       topics: [hello, world]
       default_branch: main
       private: false
+      variables:
+        - name: MY_VAR
+          value: one
     - owner: my-org
       name: org-repo
       description: An organization repository
@@ -205,6 +213,8 @@ github:
 Organization `members` are optional. Each entry references a seeded user by `login`; `role` defaults to `member`, and `admin` maps to the organization administrator role. Unknown users are ignored. Seeded memberships use the synthetic `members` team and grant private organization repository access.
 
 Repos are auto-initialized with a commit, branch, and README unless `auto_init: false` is set.
+
+Repository and organization `variables` seed Actions variables. Organization `visibility` defaults to `all`; with `selected`, `selected_repositories` lists repository names in that organization.
 
 ## Pagination
 
@@ -529,6 +539,8 @@ curl "http://localhost:4001/search/issues?q=repo:octocat/hello-world+is:open"
 # Jobs: list, get, logs
 # Artifacts: list, get, delete
 # Secrets: repo + org CRUD
+# Variables: repo + org CRUD, org visibility and selected repositories
+# Organization variables a repo can use: GET /repos/:owner/:repo/actions/organization-variables
 ```
 
 ### Checks

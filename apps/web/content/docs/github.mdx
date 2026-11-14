@@ -70,12 +70,22 @@ github:
       members:
         - login: octocat
           role: admin
+      variables:
+        - name: ALLOWLIST
+          value: octocat,hubot
+          visibility: selected
+          selected_repositories: [org-repo]
   repos:
     - owner: my-org
       name: org-repo
       private: true
+      variables:
+        - name: MY_VAR
+          value: one
   strict_scopes: false
 ```
+
+Repository and organization `variables` seed Actions variables. Organization `visibility` defaults to `all`; with `selected`, `selected_repositories` lists repository names in that organization.
 
 `strict_scopes` defaults to `false`. When you set it to `true`, a token the emulator did not issue returns `401 Bad credentials` instead of acting as the default user.
 
@@ -208,6 +218,7 @@ Organization `members` are optional. Each entry references a seeded user by `log
 - Jobs: list, get, logs
 - Artifacts: list, get, delete
 - Secrets: repo + org CRUD
+- Variables: repo + org CRUD, org `visibility` with selected repositories, and `GET /repos/:owner/:repo/actions/organization-variables`. Seed them with `variables` under a repo or org.
 
 ## Checks
 

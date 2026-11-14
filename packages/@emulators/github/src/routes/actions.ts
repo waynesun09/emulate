@@ -1,5 +1,13 @@
-import type { RouteContext, AuthUser } from "@emulators/core";
-import { ApiError, forbidden, parseJsonBody, parsePagination, setLinkHeader, unauthorized } from "@emulators/core";
+import type { RouteContext, AuthUser, Context } from "@emulators/core";
+import {
+  ApiError,
+  forbidden,
+  parseJsonBody,
+  parsePagination,
+  setLinkHeader,
+  unauthorized,
+  validationError,
+} from "@emulators/core";
 import { getGitHubStore } from "../store.js";
 import type { GitHubStore } from "../store.js";
 import type {
@@ -9,6 +17,7 @@ import type {
   GitHubRepo,
   GitHubSecret,
   GitHubUser,
+  GitHubVariable,
   GitHubWorkflow,
   GitHubWorkflowRun,
 } from "../entities.js";
@@ -16,8 +25,13 @@ import { formatRepo, formatUser, generateNodeId, generateSha, lookupRepo, timest
 import {
   assertAuthenticatedActor,
   assertRepoAdmin,
+  assertAuthenticatedUser,
   assertRepoPermission,
+  canAccessRepo,
   getActorUser,
+  hasRepoAdmin,
+  installationCanAccessRepo,
+  isOrgMember,
   notFoundResponse,
   ownerLoginOf,
 } from "../route-helpers.js";
@@ -100,6 +114,159 @@ function listRepoSecrets(gh: GitHubStore, repoId: number): GitHubSecret[] {
 
 function listOrgSecrets(gh: GitHubStore, orgId: number): GitHubSecret[] {
   return gh.secrets.all().filter((s) => s.org_id === orgId && s.repo_id === null);
+}
+
+const VARIABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const VARIABLE_VISIBILITIES = ["all", "private", "selected"] as const;
+type VariableVisibility = (typeof VARIABLE_VISIBILITIES)[number];
+
+// GitHub stores variable names in upper case and matches them case-insensitively.
+function normalizeVariableName(value: unknown): string {
+  if (typeof value !== "string" || !VARIABLE_NAME_PATTERN.test(value)) {
+    throw validationError(
+      "Variable names can only contain alphanumeric characters or underscores and must not start with a number",
+    );
+  }
+  const name = value.toUpperCase();
+  if (name.startsWith("GITHUB_")) throw validationError("Variable names must not start with the GITHUB_ prefix");
+  return name;
+}
+
+function requireVariableValue(value: unknown): string {
+  if (typeof value !== "string") throw validationError("Variable value is required");
+  return value;
+}
+
+function parseVariableVisibility(value: unknown): VariableVisibility {
+  if (typeof value !== "string" || !(VARIABLE_VISIBILITIES as readonly string[]).includes(value)) {
+    throw validationError("Variable visibility must be one of: all, private, selected");
+  }
+  return value as VariableVisibility;
+}
+
+function findRepoVariable(gh: GitHubStore, repoId: number, name: string): GitHubVariable | undefined {
+  const upper = name.toUpperCase();
+  return gh.variables.findBy("repo_id", repoId).find((v) => v.org_id === null && v.name === upper);
+}
+
+function findOrgVariable(gh: GitHubStore, orgId: number, name: string): GitHubVariable | undefined {
+  const upper = name.toUpperCase();
+  return gh.variables.findBy("org_id", orgId).find((v) => v.repo_id === null && v.name === upper);
+}
+
+function listRepoVariables(gh: GitHubStore, repoId: number): GitHubVariable[] {
+  return gh.variables
+    .findBy("repo_id", repoId)
+    .filter((v) => v.org_id === null)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function listOrgVariables(gh: GitHubStore, orgId: number): GitHubVariable[] {
+  return gh.variables
+    .findBy("org_id", orgId)
+    .filter((v) => v.repo_id === null)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function orgVariablesForRepo(gh: GitHubStore, repo: GitHubRepo): GitHubVariable[] {
+  if (repo.owner_type !== "Organization") return [];
+  return listOrgVariables(gh, repo.owner_id).filter(
+    (v) =>
+      v.visibility === "all" ||
+      (v.visibility === "private" && repo.private) ||
+      (v.visibility === "selected" && v.selected_repository_ids.includes(repo.id)),
+  );
+}
+
+function formatVariable(v: GitHubVariable) {
+  return { name: v.name, value: v.value, created_at: v.created_at, updated_at: v.updated_at };
+}
+
+function formatOrgVariable(v: GitHubVariable, org: GitHubOrg, baseUrl: string) {
+  return {
+    ...formatVariable(v),
+    visibility: v.visibility,
+    ...(v.visibility === "selected"
+      ? { selected_repositories_url: `${baseUrl}/orgs/${org.login}/actions/variables/${v.name}/repositories` }
+      : {}),
+  };
+}
+
+// GitHub pages variable lists with a default of 10 and a maximum of 30 per page.
+function paginateVariables<T>(c: Context, items: T[]): T[] {
+  const { page } = parsePagination(c);
+  const requested = parseInt(c.req.query("per_page") ?? "10", 10) || 10;
+  const perPage = Math.min(30, Math.max(1, requested));
+  setLinkHeader(c, items.length, page, perPage);
+  return items.slice((page - 1) * perPage, page * perPage);
+}
+
+function installationGrants(authUser: AuthUser, permission: string, required: "read" | "write"): boolean {
+  const granted = authUser.installation?.permissions[permission];
+  return required === "read" ? granted === "read" || granted === "write" : granted === "write";
+}
+
+function isRepoCollaborator(gh: GitHubStore, user: GitHubUser, repo: GitHubRepo): boolean {
+  if (repo.owner_type === "User" && repo.owner_id === user.id) return true;
+  if (repo.owner_type === "Organization" && isOrgMember(gh, user.id, repo.owner_id)) return true;
+  return gh.collaborators.findBy("repo_id", repo.id).some((c) => c.user_id === user.id);
+}
+
+// Variable values are returned in plain text, so reads need collaborator access and writes need repository admin
+// access, like secrets. Installation tokens need the actions_variables permission on a repository they can access.
+function assertRepoVariablesAccess(
+  gh: GitHubStore,
+  authUser: AuthUser | undefined,
+  repo: GitHubRepo,
+  required: "read" | "write",
+): void {
+  if (authUser?.installation) {
+    if (!installationCanAccessRepo(authUser, repo)) throw forbidden();
+    if (!installationGrants(authUser, "actions_variables", required)) throw forbidden();
+    return;
+  }
+  if (!canAccessRepo(gh, authUser, repo)) throw notFoundResponse();
+  const user = assertAuthenticatedUser(gh, authUser);
+  const allowed = required === "write" ? hasRepoAdmin(gh, user, repo) : isRepoCollaborator(gh, user, repo);
+  if (!allowed) throw forbidden();
+}
+
+function assertOrgVariablesAccess(
+  gh: GitHubStore,
+  authUser: AuthUser | undefined,
+  org: GitHubOrg,
+  required: "read" | "write",
+): void {
+  const installation = authUser?.installation;
+  if (installation) {
+    if (installation.accountType !== "Organization" || installation.accountId !== org.id) throw forbidden();
+    if (!installationGrants(authUser, "organization_actions_variables", required)) throw forbidden();
+    return;
+  }
+  assertOrgAdmin(gh, authUser, org);
+}
+
+function parseSelectedRepositoryIds(gh: GitHubStore, org: GitHubOrg, value: unknown): number[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || !value.every((id) => Number.isInteger(id))) {
+    throw validationError("selected_repository_ids must be an array of repository IDs");
+  }
+  for (const id of value as number[]) assertOrgRepositoryId(gh, org, id);
+  return [...new Set(value as number[])];
+}
+
+function assertOrgRepositoryId(gh: GitHubStore, org: GitHubOrg, id: number): GitHubRepo {
+  const repo = Number.isInteger(id) ? gh.repos.get(id) : undefined;
+  if (!repo || repo.owner_type !== "Organization" || repo.owner_id !== org.id) {
+    throw validationError(`Repository ${id} is not in the ${org.login} organization`);
+  }
+  return repo;
+}
+
+function assertSelectedVisibility(v: GitHubVariable): void {
+  if (v.visibility !== "selected") {
+    throw new ApiError(409, "Visibility of the variable is not set to selected");
+  }
 }
 
 function deleteJobsForRun(gh: GitHubStore, runId: number) {
@@ -786,6 +953,218 @@ export function actionsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
     const s = findOrgSecret(gh, org.id, name);
     if (!s) throw notFoundResponse();
     gh.secrets.delete(s.id);
+    return c.body(null, 204);
+  });
+
+  app.get("/repos/:owner/:repo/actions/variables", (c) => {
+    const repo = lookupRepo(gh, c.req.param("owner")!, c.req.param("repo")!);
+    if (!repo) throw notFoundResponse();
+    assertRepoVariablesAccess(gh, c.get("authUser"), repo, "read");
+    const variables = listRepoVariables(gh, repo.id);
+    return c.json({ total_count: variables.length, variables: paginateVariables(c, variables).map(formatVariable) });
+  });
+
+  app.post("/repos/:owner/:repo/actions/variables", async (c) => {
+    const repo = lookupRepo(gh, c.req.param("owner")!, c.req.param("repo")!);
+    if (!repo) throw notFoundResponse();
+    assertRepoVariablesAccess(gh, c.get("authUser"), repo, "write");
+    const body = await parseJsonBody(c);
+    const name = normalizeVariableName(body.name);
+    const value = requireVariableValue(body.value);
+    if (findRepoVariable(gh, repo.id, name)) throw new ApiError(409, "Variable already exists");
+    gh.variables.insert({
+      repo_id: repo.id,
+      org_id: null,
+      name,
+      value,
+      visibility: "all",
+      selected_repository_ids: [],
+    });
+    return c.body(null, 201);
+  });
+
+  app.get("/repos/:owner/:repo/actions/variables/:name", (c) => {
+    const repo = lookupRepo(gh, c.req.param("owner")!, c.req.param("repo")!);
+    if (!repo) throw notFoundResponse();
+    assertRepoVariablesAccess(gh, c.get("authUser"), repo, "read");
+    const v = findRepoVariable(gh, repo.id, c.req.param("name")!);
+    if (!v) throw notFoundResponse();
+    return c.json(formatVariable(v));
+  });
+
+  app.patch("/repos/:owner/:repo/actions/variables/:name", async (c) => {
+    const repo = lookupRepo(gh, c.req.param("owner")!, c.req.param("repo")!);
+    if (!repo) throw notFoundResponse();
+    assertRepoVariablesAccess(gh, c.get("authUser"), repo, "write");
+    const v = findRepoVariable(gh, repo.id, c.req.param("name")!);
+    if (!v) throw notFoundResponse();
+    const body = await parseJsonBody(c);
+    const update: Partial<GitHubVariable> = {};
+    if (body.name !== undefined) {
+      const name = normalizeVariableName(body.name);
+      const clash = findRepoVariable(gh, repo.id, name);
+      if (clash && clash.id !== v.id) throw new ApiError(409, "Variable already exists");
+      update.name = name;
+    }
+    if (body.value !== undefined) update.value = requireVariableValue(body.value);
+    gh.variables.update(v.id, update);
+    return c.body(null, 204);
+  });
+
+  app.delete("/repos/:owner/:repo/actions/variables/:name", (c) => {
+    const repo = lookupRepo(gh, c.req.param("owner")!, c.req.param("repo")!);
+    if (!repo) throw notFoundResponse();
+    assertRepoVariablesAccess(gh, c.get("authUser"), repo, "write");
+    const v = findRepoVariable(gh, repo.id, c.req.param("name")!);
+    if (!v) throw notFoundResponse();
+    gh.variables.delete(v.id);
+    return c.body(null, 204);
+  });
+
+  app.get("/repos/:owner/:repo/actions/organization-variables", (c) => {
+    const repo = lookupRepo(gh, c.req.param("owner")!, c.req.param("repo")!);
+    if (!repo) throw notFoundResponse();
+    assertRepoVariablesAccess(gh, c.get("authUser"), repo, "read");
+    const variables = orgVariablesForRepo(gh, repo);
+    return c.json({ total_count: variables.length, variables: paginateVariables(c, variables).map(formatVariable) });
+  });
+
+  app.get("/orgs/:org/actions/variables", (c) => {
+    const org = getOrgByLogin(gh, c.req.param("org")!);
+    if (!org) throw notFoundResponse();
+    assertOrgVariablesAccess(gh, c.get("authUser"), org, "read");
+    const variables = listOrgVariables(gh, org.id);
+    return c.json({
+      total_count: variables.length,
+      variables: paginateVariables(c, variables).map((v) => formatOrgVariable(v, org, baseUrl)),
+    });
+  });
+
+  app.post("/orgs/:org/actions/variables", async (c) => {
+    const org = getOrgByLogin(gh, c.req.param("org")!);
+    if (!org) throw notFoundResponse();
+    assertOrgVariablesAccess(gh, c.get("authUser"), org, "write");
+    const body = await parseJsonBody(c);
+    const name = normalizeVariableName(body.name);
+    const value = requireVariableValue(body.value);
+    const visibility = parseVariableVisibility(body.visibility);
+    const selected = parseSelectedRepositoryIds(gh, org, body.selected_repository_ids);
+    if (findOrgVariable(gh, org.id, name)) throw new ApiError(409, "Variable already exists");
+    gh.variables.insert({
+      repo_id: null,
+      org_id: org.id,
+      name,
+      value,
+      visibility,
+      selected_repository_ids: visibility === "selected" ? selected : [],
+    });
+    return c.body(null, 201);
+  });
+
+  app.get("/orgs/:org/actions/variables/:name", (c) => {
+    const org = getOrgByLogin(gh, c.req.param("org")!);
+    if (!org) throw notFoundResponse();
+    assertOrgVariablesAccess(gh, c.get("authUser"), org, "read");
+    const v = findOrgVariable(gh, org.id, c.req.param("name")!);
+    if (!v) throw notFoundResponse();
+    return c.json(formatOrgVariable(v, org, baseUrl));
+  });
+
+  app.patch("/orgs/:org/actions/variables/:name", async (c) => {
+    const org = getOrgByLogin(gh, c.req.param("org")!);
+    if (!org) throw notFoundResponse();
+    assertOrgVariablesAccess(gh, c.get("authUser"), org, "write");
+    const v = findOrgVariable(gh, org.id, c.req.param("name")!);
+    if (!v) throw notFoundResponse();
+    const body = await parseJsonBody(c);
+    const update: Partial<GitHubVariable> = {};
+    if (body.name !== undefined) {
+      const name = normalizeVariableName(body.name);
+      const clash = findOrgVariable(gh, org.id, name);
+      if (clash && clash.id !== v.id) throw new ApiError(409, "Variable already exists");
+      update.name = name;
+    }
+    if (body.value !== undefined) update.value = requireVariableValue(body.value);
+    const visibility = body.visibility !== undefined ? parseVariableVisibility(body.visibility) : v.visibility;
+    update.visibility = visibility;
+    if (visibility !== "selected") {
+      update.selected_repository_ids = [];
+    } else if (body.selected_repository_ids !== undefined) {
+      update.selected_repository_ids = parseSelectedRepositoryIds(gh, org, body.selected_repository_ids);
+    }
+    gh.variables.update(v.id, update);
+    return c.body(null, 204);
+  });
+
+  app.delete("/orgs/:org/actions/variables/:name", (c) => {
+    const org = getOrgByLogin(gh, c.req.param("org")!);
+    if (!org) throw notFoundResponse();
+    assertOrgVariablesAccess(gh, c.get("authUser"), org, "write");
+    const v = findOrgVariable(gh, org.id, c.req.param("name")!);
+    if (!v) throw notFoundResponse();
+    gh.variables.delete(v.id);
+    return c.body(null, 204);
+  });
+
+  app.get("/orgs/:org/actions/variables/:name/repositories", (c) => {
+    const org = getOrgByLogin(gh, c.req.param("org")!);
+    if (!org) throw notFoundResponse();
+    assertOrgVariablesAccess(gh, c.get("authUser"), org, "read");
+    const v = findOrgVariable(gh, org.id, c.req.param("name")!);
+    if (!v) throw notFoundResponse();
+    assertSelectedVisibility(v);
+    const repos = v.selected_repository_ids
+      .map((id) => gh.repos.get(id))
+      .filter((r): r is GitHubRepo => r !== undefined)
+      .sort((a, b) => a.id - b.id);
+    const { page, per_page } = parsePagination(c);
+    setLinkHeader(c, repos.length, page, per_page);
+    return c.json({
+      total_count: repos.length,
+      repositories: repos.slice((page - 1) * per_page, page * per_page).map((r) => formatRepo(r, gh, baseUrl)),
+    });
+  });
+
+  app.put("/orgs/:org/actions/variables/:name/repositories", async (c) => {
+    const org = getOrgByLogin(gh, c.req.param("org")!);
+    if (!org) throw notFoundResponse();
+    assertOrgVariablesAccess(gh, c.get("authUser"), org, "write");
+    const v = findOrgVariable(gh, org.id, c.req.param("name")!);
+    if (!v) throw notFoundResponse();
+    assertSelectedVisibility(v);
+    const body = await parseJsonBody(c);
+    if (body.selected_repository_ids === undefined) throw validationError("selected_repository_ids is required");
+    gh.variables.update(v.id, {
+      selected_repository_ids: parseSelectedRepositoryIds(gh, org, body.selected_repository_ids),
+    });
+    return c.body(null, 204);
+  });
+
+  app.put("/orgs/:org/actions/variables/:name/repositories/:repository_id", (c) => {
+    const org = getOrgByLogin(gh, c.req.param("org")!);
+    if (!org) throw notFoundResponse();
+    assertOrgVariablesAccess(gh, c.get("authUser"), org, "write");
+    const v = findOrgVariable(gh, org.id, c.req.param("name")!);
+    if (!v) throw notFoundResponse();
+    assertSelectedVisibility(v);
+    const repo = assertOrgRepositoryId(gh, org, Number(c.req.param("repository_id")));
+    if (!v.selected_repository_ids.includes(repo.id)) {
+      gh.variables.update(v.id, { selected_repository_ids: [...v.selected_repository_ids, repo.id] });
+    }
+    return c.body(null, 204);
+  });
+
+  app.delete("/orgs/:org/actions/variables/:name/repositories/:repository_id", (c) => {
+    const org = getOrgByLogin(gh, c.req.param("org")!);
+    if (!org) throw notFoundResponse();
+    assertOrgVariablesAccess(gh, c.get("authUser"), org, "write");
+    const v = findOrgVariable(gh, org.id, c.req.param("name")!);
+    if (!v) throw notFoundResponse();
+    assertSelectedVisibility(v);
+    const repo = assertOrgRepositoryId(gh, org, Number(c.req.param("repository_id")));
+    gh.variables.update(v.id, {
+      selected_repository_ids: v.selected_repository_ids.filter((id) => id !== repo.id),
+    });
     return c.body(null, 204);
   });
 }

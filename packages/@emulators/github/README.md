@@ -125,6 +125,7 @@ npm install @emulators/github
 - Jobs: list, get, logs
 - Artifacts: list, get, delete
 - Secrets: repo + org CRUD
+- Variables: repo + org CRUD, org `visibility` with selected repositories, and `GET /repos/:owner/:repo/actions/organization-variables`. Seed them with `variables` under a repo or org.
 
 ### Checks
 - Check runs: create, update, get, annotations, rerequest, list by ref/suite. Ref based lookups accept branch and tag refs containing slashes.

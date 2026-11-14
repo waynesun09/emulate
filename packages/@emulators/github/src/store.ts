@@ -29,6 +29,7 @@ import type {
   GitHubJob,
   GitHubArtifact,
   GitHubSecret,
+  GitHubVariable,
   GitHubCheckRun,
   GitHubCheckSuite,
   GitHubOAuthApp,
@@ -68,6 +69,7 @@ export interface GitHubStore {
   jobs: Collection<GitHubJob>;
   artifacts: Collection<GitHubArtifact>;
   secrets: Collection<GitHubSecret>;
+  variables: Collection<GitHubVariable>;
   checkRuns: Collection<GitHubCheckRun>;
   checkSuites: Collection<GitHubCheckSuite>;
   oauthApps: Collection<GitHubOAuthApp>;
@@ -108,6 +110,7 @@ export function getGitHubStore(store: Store): GitHubStore {
     jobs: store.collection<GitHubJob>("github.jobs", ["run_id"]),
     artifacts: store.collection<GitHubArtifact>("github.artifacts", ["run_id", "repo_id"]),
     secrets: store.collection<GitHubSecret>("github.secrets", ["repo_id", "org_id"]),
+    variables: store.collection<GitHubVariable>("github.variables", ["repo_id", "org_id"]),
     checkRuns: store.collection<GitHubCheckRun>("github.check_runs", ["repo_id", "head_sha"]),
     checkSuites: store.collection<GitHubCheckSuite>("github.check_suites", ["repo_id", "head_sha"]),
     oauthApps: store.collection<GitHubOAuthApp>("github.oauth_apps", ["client_id"]),

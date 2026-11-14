@@ -434,6 +434,15 @@ export interface GitHubSecret extends Entity {
   visibility: "all" | "private" | "selected";
 }
 
+export interface GitHubVariable extends Entity {
+  repo_id: number | null;
+  org_id: number | null;
+  name: string;
+  value: string;
+  visibility: "all" | "private" | "selected";
+  selected_repository_ids: number[];
+}
+
 export interface GitHubCheckAnnotation {
   path: string;
   start_line: number;

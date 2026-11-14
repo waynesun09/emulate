@@ -64,6 +64,12 @@ export interface GitHubSeedConfig {
       login: string;
       role?: "member" | "admin";
     }>;
+    variables?: Array<{
+      name: string;
+      value: string;
+      visibility?: "all" | "private" | "selected";
+      selected_repositories?: string[];
+    }>;
   }>;
   tokens?: Record<string, { login: string; scopes?: string[] }>;
   repos?: Array<{
@@ -75,6 +81,7 @@ export interface GitHubSeedConfig {
     topics?: string[];
     default_branch?: string;
     auto_init?: boolean;
+    variables?: Array<{ name: string; value: string }>;
   }>;
   oauth_apps?: Array<{
     client_id: string;
@@ -490,6 +497,8 @@ export function seedFromConfig(store: Store, baseUrl: string, config: GitHubSeed
     }
   }
 
+  seedVariables(gh, config);
+
   if (config.oauth_apps) {
     for (const oa of config.oauth_apps) {
       const existing = gh.oauthApps.findOneBy("client_id", oa.client_id);
@@ -554,6 +563,53 @@ export function seedFromConfig(store: Store, baseUrl: string, config: GitHubSeed
           });
         }
       }
+    }
+  }
+}
+
+function seedVariables(gh: GitHubStore, config: GitHubSeedConfig): void {
+  for (const r of config.repos ?? []) {
+    const repo = gh.repos.findOneBy("full_name", `${r.owner}/${r.name}`);
+    if (!repo) continue;
+    for (const v of r.variables ?? []) {
+      const name = v.name.toUpperCase();
+      const exists = gh.variables.findBy("repo_id", repo.id).some((row) => row.org_id === null && row.name === name);
+      if (exists) continue;
+      gh.variables.insert({
+        repo_id: repo.id,
+        org_id: null,
+        name,
+        value: v.value,
+        visibility: "all",
+        selected_repository_ids: [],
+      });
+    }
+  }
+
+  for (const o of config.orgs ?? []) {
+    const org = gh.orgs.findOneBy("login", o.login);
+    if (!org) continue;
+    for (const v of o.variables ?? []) {
+      const name = v.name.toUpperCase();
+      const exists = gh.variables.findBy("org_id", org.id).some((row) => row.repo_id === null && row.name === name);
+      if (exists) continue;
+      const visibility = v.visibility ?? "all";
+      const selected: number[] = [];
+      if (visibility === "selected") {
+        for (const repoName of v.selected_repositories ?? []) {
+          const fullName = repoName.includes("/") ? repoName : `${o.login}/${repoName}`;
+          const repo = gh.repos.findOneBy("full_name", fullName);
+          if (repo && repo.owner_type === "Organization" && repo.owner_id === org.id) selected.push(repo.id);
+        }
+      }
+      gh.variables.insert({
+        repo_id: null,
+        org_id: org.id,
+        name,
+        value: v.value,
+        visibility,
+        selected_repository_ids: selected,
+      });
     }
   }
 }
