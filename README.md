@@ -965,6 +965,7 @@ Every endpoint below is fully stateful. Creates, updates, and deletes persist in
 - Jobs: list, get, logs
 - Artifacts: list, get, delete
 - Secrets: repo + org CRUD
+- Secrets public keys: `GET /repos/:owner/:repo/actions/secrets/public-key` and `GET /orgs/:org/actions/secrets/public-key` return a `key_id` and a base64 Curve25519 `key` for libsodium sealed boxes. Each repository and organization gets its own key, stable until the store is reset. A secret `PUT` that sends `encrypted_value` or `key_id` must send both, with the current `key_id` and a base64 sealed box; otherwise it returns `422`.
 
 ### Checks
 - Check runs: create, update, get, annotations, rerequest, list by ref/suite. Ref based lookups accept branch and tag refs containing slashes.

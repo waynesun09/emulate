@@ -1,8 +1,18 @@
+import { createHash, generateKeyPairSync } from "crypto";
 import type { RouteContext, AuthUser } from "@emulators/core";
-import { ApiError, forbidden, parseJsonBody, parsePagination, setLinkHeader, unauthorized } from "@emulators/core";
+import {
+  ApiError,
+  forbidden,
+  parseJsonBody,
+  parsePagination,
+  setLinkHeader,
+  unauthorized,
+  validationError,
+} from "@emulators/core";
 import { getGitHubStore } from "../store.js";
 import type { GitHubStore } from "../store.js";
 import type {
+  GitHubActionsPublicKey,
   GitHubArtifact,
   GitHubJob,
   GitHubOrg,
@@ -100,6 +110,50 @@ function listRepoSecrets(gh: GitHubStore, repoId: number): GitHubSecret[] {
 
 function listOrgSecrets(gh: GitHubStore, orgId: number): GitHubSecret[] {
   return gh.secrets.all().filter((s) => s.org_id === orgId && s.repo_id === null);
+}
+
+// Each repository and organization gets its own X25519 key pair on first use. It stays stable until the store is reset.
+function getOrCreatePublicKey(
+  gh: GitHubStore,
+  owner: { repo_id: number; org_id: null } | { repo_id: null; org_id: number },
+): GitHubActionsPublicKey {
+  const existing =
+    owner.repo_id !== null
+      ? gh.actionsPublicKeys.findBy("repo_id", owner.repo_id).find((k) => k.org_id === null)
+      : gh.actionsPublicKeys.findBy("org_id", owner.org_id).find((k) => k.repo_id === null);
+  if (existing) return existing;
+
+  const { publicKey, privateKey } = generateKeyPairSync("x25519");
+  const raw = Buffer.from(publicKey.export({ format: "jwk" }).x!, "base64url");
+  // GitHub key IDs are numeric strings; derive one from the key so it changes whenever the key does.
+  const keyId = createHash("sha256").update(raw).digest().readBigUInt64BE(0).toString();
+  return gh.actionsPublicKeys.insert({
+    ...owner,
+    key_id: keyId,
+    key: raw.toString("base64"),
+    private_key: privateKey.export({ format: "der", type: "pkcs8" }).toString("base64"),
+  });
+}
+
+// A libsodium sealed box carries a 32-byte ephemeral public key and a 16-byte MAC around the ciphertext.
+const SEALED_BOX_OVERHEAD = 48;
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+// Requests without encrypted_value or key_id keep working. When a client sends either, it must send both, encrypted
+// for the current key of the repository or organization.
+function assertEncryptedSecretBody(body: Record<string, unknown>, key: () => GitHubActionsPublicKey): void {
+  const { encrypted_value: encryptedValue, key_id: keyId } = body;
+  if (encryptedValue === undefined && keyId === undefined) return;
+  if (typeof keyId !== "string" || keyId !== key().key_id) {
+    throw validationError("key_id does not match the current public key");
+  }
+  if (
+    typeof encryptedValue !== "string" ||
+    !BASE64_PATTERN.test(encryptedValue) ||
+    Buffer.from(encryptedValue, "base64").length <= SEALED_BOX_OVERHEAD
+  ) {
+    throw validationError("encrypted_value must be a base64 encoded libsodium sealed box");
+  }
 }
 
 function deleteJobsForRun(gh: GitHubStore, runId: number) {
@@ -672,6 +726,15 @@ export function actionsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
     });
   });
 
+  // Registered before /secrets/:secret_name so that route does not capture public-key.
+  app.get("/repos/:owner/:repo/actions/secrets/public-key", (c) => {
+    const repo = lookupRepo(gh, c.req.param("owner")!, c.req.param("repo")!);
+    if (!repo) throw notFoundResponse();
+    assertRepoPermission(gh, c.get("authUser"), repo, "secrets");
+    const key = getOrCreatePublicKey(gh, { repo_id: repo.id, org_id: null });
+    return c.json({ key_id: key.key_id, key: key.key });
+  });
+
   app.get("/repos/:owner/:repo/actions/secrets/:secret_name", (c) => {
     const owner = c.req.param("owner")!;
     const repoName = c.req.param("repo")!;
@@ -695,7 +758,8 @@ export function actionsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
     const repo = lookupRepo(gh, owner, repoName);
     if (!repo) throw notFoundResponse();
     assertRepoAdmin(gh, c.get("authUser"), repo);
-    await parseJsonBody(c);
+    const body = await parseJsonBody(c);
+    assertEncryptedSecretBody(body, () => getOrCreatePublicKey(gh, { repo_id: repo.id, org_id: null }));
     const name = c.req.param("secret_name")!;
     const existing = findRepoSecret(gh, repo.id, name);
     if (existing) {
@@ -740,6 +804,14 @@ export function actionsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
     });
   });
 
+  app.get("/orgs/:org/actions/secrets/public-key", (c) => {
+    const org = getOrgByLogin(gh, c.req.param("org")!);
+    if (!org) throw notFoundResponse();
+    assertOrgAdmin(gh, c.get("authUser"), org);
+    const key = getOrCreatePublicKey(gh, { repo_id: null, org_id: org.id });
+    return c.json({ key_id: key.key_id, key: key.key });
+  });
+
   app.get("/orgs/:org/actions/secrets/:secret_name", (c) => {
     const orgLogin = c.req.param("org")!;
     const org = getOrgByLogin(gh, orgLogin);
@@ -761,7 +833,8 @@ export function actionsRoutes({ app, store, webhooks, baseUrl }: RouteContext): 
     const org = getOrgByLogin(gh, orgLogin);
     if (!org) throw notFoundResponse();
     assertOrgAdmin(gh, c.get("authUser"), org);
-    await parseJsonBody(c);
+    const body = await parseJsonBody(c);
+    assertEncryptedSecretBody(body, () => getOrCreatePublicKey(gh, { repo_id: null, org_id: org.id }));
     const name = c.req.param("secret_name")!;
     const existing = findOrgSecret(gh, org.id, name);
     if (existing) {

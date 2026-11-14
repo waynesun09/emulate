@@ -529,6 +529,12 @@ curl "http://localhost:4001/search/issues?q=repo:octocat/hello-world+is:open"
 # Jobs: list, get, logs
 # Artifacts: list, get, delete
 # Secrets: repo + org CRUD
+
+# Secrets public key (base64 Curve25519 key for a libsodium sealed box)
+curl http://localhost:4001/repos/octocat/hello-world/actions/secrets/public-key \
+  -H "Authorization: Bearer $TOKEN"
+# GET /orgs/:org/actions/secrets/public-key works the same way.
+# A secret PUT that sends encrypted_value or key_id must send both, with the current key_id; otherwise 422.
 ```
 
 ### Checks

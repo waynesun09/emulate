@@ -434,6 +434,17 @@ export interface GitHubSecret extends Entity {
   visibility: "all" | "private" | "selected";
 }
 
+// Curve25519 key pair that clients use to encrypt Actions secrets with a libsodium sealed box.
+export interface GitHubActionsPublicKey extends Entity {
+  repo_id: number | null;
+  org_id: number | null;
+  key_id: string;
+  /** Base64 of the raw 32-byte public key. */
+  key: string;
+  /** Base64 of the PKCS#8 DER private key. */
+  private_key: string;
+}
+
 export interface GitHubCheckAnnotation {
   path: string;
   start_line: number;
